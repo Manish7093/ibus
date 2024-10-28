@@ -424,7 +424,10 @@ ibus_unicode_data_list_deserialize (GVariant *variant,
         IBusUnicodeData *data =
                 IBUS_UNICODE_DATA (ibus_serializable_deserialize (
                         unicode_variant));
+        if(data){
+        g_object_ref(data);  // Ref the object when adding to list
         list = g_slist_append (list, data);
+        }
         g_clear_pointer (&unicode_variant, g_variant_unref);
         if (has_signal && (i == 0 || ((i + 1) % 100) == 0)) {
             g_signal_emit_by_name (source_object,
@@ -608,6 +611,16 @@ ibus_unicode_data_load (const gchar *path,
     return retval;
 }
 
+static void 
+ibus_destroy_list_and_data (gpointer unicode_list) {
+    GSList *list = (GSList*) unicode_list;
+    
+    if (list) {
+        g_slist_free_full(list, (GDestroyNotify) g_object_unref);
+    }
+}
+
+
 static void
 ibus_unicode_data_load_async_thread (GTask        *task,
                                      gpointer      source_object,
@@ -622,11 +635,12 @@ ibus_unicode_data_load_async_thread (GTask        *task,
 
     retval = ibus_unicode_data_load_with_error (path, source_object, &error);
     g_free (path);
-    if (retval == NULL)
+    if (retval == NULL) {
         g_task_return_error (task, error);
-    else
+    } else {
+        g_task_set_task_data (task, retval, ibus_destroy_list_and_data);
         g_task_return_pointer (task, retval, NULL);
-    g_object_unref (task);
+    }
 }
 
 static void
@@ -672,6 +686,7 @@ ibus_unicode_data_load_async (const gchar        *path,
     g_task_set_source_tag (task, ibus_unicode_data_load_async);
     g_task_set_task_data (task, g_strdup (path), NULL);
     g_task_run_in_thread (task, ibus_unicode_data_load_async_thread);
+    g_object_unref (task);
 }
 
 static void
