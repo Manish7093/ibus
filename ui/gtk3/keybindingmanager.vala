@@ -18,23 +18,6 @@ public class KeybindingManager : GLib.Object {
 
     private static KeybindingManager m_instance = null;
 
-    public const uint MODIFIER_FILTER =
-        Gdk.ModifierType.MODIFIER_MASK & ~(
-        Gdk.ModifierType.LOCK_MASK |  // Caps Lock
-        // Gdk.ModifierType.MOD1_MASK |  // Alt
-        Gdk.ModifierType.MOD2_MASK |  // Num Lock
-        // Gdk.ModifierType.MOD3_MASK |
-        // Gdk.ModifierType.MOD4_MASK |  // Super, Hyper
-        // Gdk.ModifierType.MOD5_MASK |  //
-        Gdk.ModifierType.BUTTON1_MASK |
-        Gdk.ModifierType.BUTTON2_MASK |
-        Gdk.ModifierType.BUTTON3_MASK |
-        Gdk.ModifierType.BUTTON4_MASK |
-        Gdk.ModifierType.BUTTON5_MASK |
-        Gdk.ModifierType.SUPER_MASK |
-        Gdk.ModifierType.HYPER_MASK |
-        Gdk.ModifierType.META_MASK);
-
     /**
      * Helper class to store keybinding
      */
@@ -65,6 +48,7 @@ public class KeybindingManager : GLib.Object {
             Gdk.Event.handler_set(event_handler);
     }
 
+#if ENABLE_XIM
     /**
      * Bind accelerator to given handler
      *
@@ -107,6 +91,7 @@ public class KeybindingManager : GLib.Object {
         foreach (Keybinding binding in remove_bindings)
             m_bindings.remove (binding);
     }
+#endif
 
     public static KeybindingManager get_instance (bool is_wayland_im=false) {
         if (m_instance == null)
@@ -189,7 +174,7 @@ public class KeybindingManager : GLib.Object {
             }
 
             if (event.type == Gdk.EventType.KEY_PRESS) {
-                uint modifiers = event.key.state & MODIFIER_FILTER;
+                uint modifiers = event.key.state & IBus.MODIFIER_FILTER;
                 uint keyval = event.key.keyval;
                 if (keyval >= IBus.KEY_A && keyval <= IBus.KEY_Z &&
                     (modifiers & Gdk.ModifierType.SHIFT_MASK) != 0) {
@@ -207,6 +192,7 @@ public class KeybindingManager : GLib.Object {
         Gtk.main_do_event(event);
     }
 
+#if ENABLE_XIM
     // Get union of given modifiers and all the combination of the
     // modifiers in ignored_modifiers.
     XI.GrabModifiers[] get_grab_modifiers(uint modifiers) {
@@ -288,6 +274,7 @@ public class KeybindingManager : GLib.Object {
 
         return retval == 0;
     }
+#endif
 }
 
 /*

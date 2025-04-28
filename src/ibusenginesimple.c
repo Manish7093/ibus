@@ -2,7 +2,7 @@
 /* vim:set et sts=4: */
 /* ibus - The Input Bus
  * Copyright (C) 2014 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2015-2024 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2015-2025 Takao Fujiwara <takao.fujiwara1@gmail.com>
  * Copyright (C) 2014-2017 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
@@ -90,6 +90,7 @@ guint COMPOSE_BUFFER_SIZE = 20;
 G_LOCK_DEFINE_STATIC (global_tables);
 static GSList *global_tables;
 static IBusText *updated_preedit_empty;
+static IBusComposeTableEx *en_compose_table;
 
 /* functions prototype */
 static void     ibus_engine_simple_destroy      (IBusEngineSimple   *simple);
@@ -124,6 +125,10 @@ ibus_engine_simple_class_init (IBusEngineSimpleClass *class)
 {
     IBusObjectClass *ibus_object_class = IBUS_OBJECT_CLASS (class);
     IBusEngineClass *engine_class = IBUS_ENGINE_CLASS (class);
+    GBytes *data;
+    GError *error = NULL;
+    const char *contents;
+    gsize length = 0;
 
     ibus_object_class->destroy =
         (IBusObjectDestroyFunc) ibus_engine_simple_destroy;
@@ -139,17 +144,23 @@ ibus_engine_simple_class_init (IBusEngineSimpleClass *class)
                             = ibus_engine_simple_candidate_clicked;
     updated_preedit_empty = ibus_text_new_from_string ("");
     g_object_ref_sink (updated_preedit_empty);
+
+    data = g_resources_lookup_data ("/org/freedesktop/ibus/compose/sequences",
+                                    G_RESOURCE_LOOKUP_FLAGS_NONE,
+                                    &error);
+    if (error) {
+        g_warning ("Not found compose resource %s", error->message);
+        g_clear_error (&error);
+        return;
+    }
+    contents = g_bytes_get_data (data, &length);
+    en_compose_table = ibus_compose_table_deserialize (contents, length);
 }
 
 static void
 ibus_engine_simple_init (IBusEngineSimple *simple)
 {
     IBusEngineSimplePrivate *priv;
-    GBytes *data;
-    GError *error = NULL;
-    const char *contents;
-    gsize length = 0;
-    IBusComposeTableEx *en_compose_table;
 
     priv = simple->priv = IBUS_ENGINE_SIMPLE_GET_PRIVATE (simple);
     priv->compose_buffer = g_new0 (guint, COMPOSE_BUFFER_SIZE + 1);
@@ -160,16 +171,6 @@ ibus_engine_simple_init (IBusEngineSimple *simple)
     priv->tentative_match_len = 0;
     priv->updated_preedit =
             (IBusText *)g_object_ref_sink (updated_preedit_empty);
-    data = g_resources_lookup_data ("/org/freedesktop/ibus/compose/sequences",
-                                    G_RESOURCE_LOOKUP_FLAGS_NONE,
-                                    &error);
-    if (error) {
-        g_warning ("Not found compose resource %s", error->message);
-        g_clear_error (&error);
-        return;
-    }
-    contents = g_bytes_get_data (data, &length);
-    en_compose_table = ibus_compose_table_deserialize (contents, length, FALSE);
     if (!en_compose_table) {
         g_warning ("Failed to load EN compose table");
     } else {
@@ -501,7 +502,7 @@ check_hex (IBusEngineSimple *simple,
 }
 
 static IBusEngineDict *
-load_emoji_dict ()
+load_emoji_dict (void)
 {
     IBusEngineDict *emoji_dict;
     GList *keys;
@@ -544,7 +545,7 @@ check_emoji_table (IBusEngineSimple       *simple,
         g_object_ref_sink (priv->lookup_table);
     }
     if (emoji_dict == NULL)
-        emoji_dict = priv->emoji_dict = load_emoji_dict (simple);
+        emoji_dict = priv->emoji_dict = load_emoji_dict ();
 
     if (emoji_dict == NULL || emoji_dict->dict == NULL)
         return FALSE;
@@ -676,7 +677,7 @@ no_sequence_matches (IBusEngineSimple *simple,
         priv->compose_buffer[0] = 0;
         if (n_compose > 1) {
             /* Invalid sequence */
-            // FIXME beep_window (event->window);
+            /* FIXME beep_window (event->window); */
             ibus_engine_simple_update_preedit_text (simple);
             return TRUE;
         }
@@ -914,6 +915,7 @@ ibus_engine_simple_process_key_event (IBusEngine *engine,
     IBusEngineSimple *simple = (IBusEngineSimple *)engine;
     IBusEngineSimplePrivate *priv = simple->priv;
     int n_compose = 0;
+    int n_compose_prev;
     gboolean have_hex_mods;
     gboolean is_hex_start = FALSE;
     gboolean is_emoji_start = FALSE;
@@ -931,6 +933,7 @@ ibus_engine_simple_process_key_event (IBusEngine *engine,
         g_warning ("copmose table buffer is full.");
         n_compose = COMPOSE_BUFFER_SIZE;
     }
+    n_compose_prev = n_compose;
 
     if (modifiers & IBUS_RELEASE_MASK) {
         if (priv->in_hex_sequence &&
@@ -1013,10 +1016,11 @@ ibus_engine_simple_process_key_event (IBusEngine *engine,
         (priv->in_hex_sequence || priv->in_emoji_sequence)) {
         if (is_backspace) {
             priv->compose_buffer[--n_compose] = 0;
+            n_compose_prev = n_compose;
         }
         else if (is_hex_end) {
             /* invalid hex sequence */
-            // beep_window (event->window);
+            /* FIXME beep_window (event->window); */
             g_string_set_size (priv->tentative_match, 0);
             g_clear_pointer (&priv->tentative_emoji, g_free);
             priv->in_hex_sequence = FALSE;
@@ -1068,8 +1072,8 @@ ibus_engine_simple_process_key_event (IBusEngine *engine,
     /* Handle backspace */
     if (priv->in_hex_sequence && have_hex_mods && is_backspace) {
         if (n_compose > 0) {
-            n_compose--;
-            priv->compose_buffer[n_compose] = 0;
+            priv->compose_buffer[--n_compose] = 0;
+            n_compose_prev = n_compose;
             check_hex (simple, n_compose);
         } else {
             priv->in_hex_sequence = FALSE;
@@ -1081,8 +1085,8 @@ ibus_engine_simple_process_key_event (IBusEngine *engine,
     }
     if (priv->in_emoji_sequence && have_hex_mods && is_backspace) {
         if (n_compose > 0) {
-            n_compose--;
-            priv->compose_buffer[n_compose] = 0;
+            priv->compose_buffer[--n_compose] = 0;
+            n_compose_prev = n_compose;
             check_emoji_table (simple, n_compose, -1);
             ibus_engine_simple_update_lookup_and_aux_table (simple);
         } else {
@@ -1095,8 +1099,8 @@ ibus_engine_simple_process_key_event (IBusEngine *engine,
     }
     if (!priv->in_hex_sequence && !priv->in_emoji_sequence && is_backspace) {
         if (n_compose > 0) {
-            n_compose--;
-            priv->compose_buffer[n_compose] = 0;
+            priv->compose_buffer[--n_compose] = 0;
+            n_compose_prev = n_compose;
             g_string_set_size (priv->tentative_match, 0);
             priv->tentative_match_len = 0;
             ibus_engine_simple_check_all_compose_table (simple, n_compose);
@@ -1115,7 +1119,7 @@ ibus_engine_simple_process_key_event (IBusEngine *engine,
         else {
             /* invalid hex sequence */
             if (n_compose > 0) {
-                // FIXME beep_window (event->window);
+                /* FIXME beep_window (event->window); */
                 g_string_set_size (priv->tentative_match, 0);
                 priv->in_hex_sequence = FALSE;
                 priv->compose_buffer[0] = 0;
@@ -1179,9 +1183,8 @@ ibus_engine_simple_process_key_event (IBusEngine *engine,
 
             return TRUE;
         } else if (!is_hex_end) {
-            // FIXME
             /* non-hex character in hex sequence */
-            // beep_window (event->window);
+            /* FIXME beep_window (event->window); */
             return TRUE;
         }
     } else if (priv->in_emoji_sequence) {
@@ -1239,17 +1242,15 @@ ibus_engine_simple_process_key_event (IBusEngine *engine,
                     ibus_engine_simple_update_preedit_text (simple);
                     return TRUE;
                 } else {
-                    // FIXME
                     /* invalid hex sequence */
-                    // beep_window (event->window);
+                    /* FIXME beep_window (event->window); */
                     g_string_set_size (priv->tentative_match, 0);
                     priv->in_hex_sequence = FALSE;
                     priv->compose_buffer[0] = 0;
                 }
             }
             else if (!check_hex (simple, n_compose))
-                // FIXME
-                // beep_window (event->window);
+                /* FIXME beep_window (event->window); */
                 ;
             ibus_engine_simple_update_preedit_text (simple);
 
@@ -1334,8 +1335,21 @@ ibus_engine_simple_process_key_event (IBusEngine *engine,
             return TRUE;
         }
     } else { /* Then, check for compose sequences */
-        if (ibus_engine_simple_check_all_compose_table (simple, n_compose))
+        if (ibus_engine_simple_check_all_compose_table (simple, n_compose)) {
             return TRUE;
+        } else if (n_compose_prev > 0 && (n_compose - n_compose_prev) > 0) {
+            /* Show the previous preedit text. */
+            guint backup_char = 0;
+
+            n_compose = n_compose_prev;
+            g_assert (n_compose < (COMPOSE_BUFFER_SIZE + 1));
+            /* FIXME beep_window (event->window); */
+            backup_char = priv->compose_buffer[n_compose];
+            priv->compose_buffer[n_compose] = 0;
+            if (ibus_engine_simple_check_all_compose_table (simple, n_compose))
+                return TRUE;
+            priv->compose_buffer[n_compose] = backup_char;
+        }
     }
 
     /* The current compose_buffer doesn't match anything */
@@ -1529,4 +1543,3 @@ ibus_engine_simple_add_compose_file (IBusEngineSimple *simple,
                                                       compose_file);
     return TRUE;
 }
-
