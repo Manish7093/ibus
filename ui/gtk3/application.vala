@@ -3,7 +3,7 @@
  * ibus - The Input Bus
  *
  * Copyright(c) 2011 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright(c) 2017-2024 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright(c) 2017-2025 Takao Fujiwara <takao.fujiwara1@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -38,6 +38,8 @@ class Application {
     private static bool m_enable_wayland_im;
 #if USE_GDK_WAYLAND
     private static ulong m_realize_surface_id;
+    private static ulong m_ibus_focus_in_id;
+    private static ulong m_ibus_focus_out_id;
     private static string m_user;
     private static IBus.WaylandIM m_wayland_im;
     private static bool m_exec_daemon;
@@ -99,8 +101,14 @@ class Application {
         if (m_log != null)
             m_panel.set_log(m_log, m_verbose);
 #if USE_GDK_WAYLAND
-        m_realize_surface_id = m_panel.realize_surface.connect(
-                (w, s) => this.set_wayland_surface(s));
+        if (m_wayland_im != null) {
+            m_realize_surface_id = m_panel.realize_surface.connect(
+                    (w, s) => this.set_wayland_surface(s));
+            m_ibus_focus_in_id = m_wayland_im.ibus_focus_in.connect(
+                    (w, o) => m_panel.set_wayland_object_path(o));
+            m_ibus_focus_out_id = m_wayland_im.ibus_focus_out.connect(
+                    (w, o) => m_panel.set_wayland_object_path(null));
+        }
 #endif
         m_panel.load_settings();
     }
@@ -126,6 +134,14 @@ class Application {
             GLib.SignalHandler.disconnect(m_panel, m_realize_surface_id);
             m_realize_surface_id = 0;
         }
+        if (m_ibus_focus_in_id != 0) {
+            GLib.SignalHandler.disconnect(m_wayland_im, m_ibus_focus_in_id);
+            m_ibus_focus_in_id = 0;
+        }
+        if (m_ibus_focus_out_id != 0) {
+            GLib.SignalHandler.disconnect(m_wayland_im, m_ibus_focus_out_id);
+            m_ibus_focus_out_id = 0;
+        }
 #endif
         m_panel = null;
     }
@@ -141,19 +157,28 @@ class Application {
 
     private void bus_global_shortcut_key_cb(IBus.Bus bus,
                                             uint8    type,
-                                            bool     is_pressed,
+                                            uint     keyval,
+                                            uint     keycode,
+                                            uint     state,
                                             bool     is_backward) {
         if (m_panel == null)
             return;
         if (m_verbose) {
-            m_log.printf("Global shortcut key %u pressed %s backward %s\n",
+            m_log.printf("Global shortcut key %u keyval %X keycode %u " +
+                         "state %X pressed %s backward %s\n",
                          type,
-                         is_pressed ? "TRUE" : "FALSE",
+                         keyval, keycode, state,
+                         (state & IBus.ModifierType.RELEASE_MASK) != 0
+                                 ? "FALSE" : "TRUE",
                          is_backward ? "TRUE" : "FALSE");
             m_log.flush();
         }
         IBus.BusGlobalBindingType gtype = (IBus.BusGlobalBindingType)type;
-        m_panel.set_global_shortcut_key_state(gtype, is_pressed, is_backward);
+        m_panel.set_global_shortcut_key_state(gtype,
+                                              keyval,
+                                              keycode,
+                                              state,
+                                              is_backward);
     }
 
 #if USE_GDK_WAYLAND

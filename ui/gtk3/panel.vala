@@ -3,7 +3,7 @@
  * ibus - The Input Bus
  *
  * Copyright(c) 2011-2014 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright(c) 2015-2024 Takao Fujwiara <takao.fujiwara1@gmail.com>
+ * Copyright(c) 2015-2025 Takao Fujwiara <takao.fujiwara1@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -49,10 +49,15 @@ class Panel : IBus.PanelService {
     private bool m_use_global_engine = true;
     private bool m_use_engine_lang = true;
     private CandidatePanel m_candidate_panel;
+    private CandidatePanel m_candidate_panel_active;
     private Switcher m_switcher;
+    private Switcher m_switcher_active;
+#if USE_GDK_WAYLAND
+    private CandidatePanel m_candidate_panel_x11;
+    private Switcher m_switcher_x11;
+#endif
     private uint m_switcher_focus_set_engine_id;
     private int m_switcher_selected_index = -1;
-    private Thread<bool> m_switcher_waiting_release;
     private PropertyManager m_property_manager;
     private PropertyPanel m_property_panel;
     private GLib.Pid m_setup_pid = 0;
@@ -79,11 +84,9 @@ class Panel : IBus.PanelService {
     private uint m_menu_update_delay_time_id;
     private bool m_is_wayland;
     private bool m_is_wayland_im;
+    private bool m_is_indicator;
 #if INDICATOR
-    private bool m_is_kde = is_kde();
     private bool m_is_context_menu;
-#else
-    private bool m_is_kde = false;
 #endif
     private ulong m_popup_menu_id;
     private ulong m_activate_id;
@@ -95,6 +98,7 @@ class Panel : IBus.PanelService {
             new GLib.List<BindingCommon.Keybinding>();
 
 #if USE_GDK_WAYLAND
+    private string? m_wayland_object_path;
     public signal void realize_surface(void *surface);
     public signal void update_shortcut_keys(
             IBus.ProcessKeyEventData[] data,
@@ -114,11 +118,15 @@ class Panel : IBus.PanelService {
 #if USE_GDK_WAYLAND
         m_is_wayland = !BindingCommon.default_is_xdisplay();
 #else
-        m_is_wayland = false;
         warning("Checking Wayland is disabled");
 #endif
 
         init_settings();
+        set_version();
+        check_wayland();
+#if INDICATOR
+        m_is_indicator = is_indicator();
+#endif
 
         // indicator.set_menu() requires m_property_manager.
         m_property_manager = new PropertyManager();
@@ -128,7 +136,7 @@ class Panel : IBus.PanelService {
 
         // init ui
 #if INDICATOR
-        if (m_is_kde) {
+        if (m_is_indicator) {
             init_indicator();
         } else {
             init_status_icon();
@@ -137,37 +145,18 @@ class Panel : IBus.PanelService {
         init_status_icon();
 #endif
 
-        m_candidate_panel = new CandidatePanel();
-        m_candidate_panel.page_up.connect((w) => this.page_up());
-        m_candidate_panel.page_down.connect((w) => this.page_down());
-        m_candidate_panel.cursor_up.connect((w) => this.cursor_up());
-        m_candidate_panel.cursor_down.connect((w) => this.cursor_down());
-        m_candidate_panel.candidate_clicked.connect(
-                (w, i, b, s) => this.candidate_clicked(i, b, s));
-#if USE_GDK_WAYLAND
-        m_candidate_panel.realize_surface.connect(
-                (w, s) => this.realize_surface(s));
-#endif
+        m_candidate_panel = candidate_panel_new(false);
+        m_candidate_panel_active = m_candidate_panel;
 
-        m_switcher = new Switcher();
-#if USE_GDK_WAYLAND
-        m_switcher.realize_surface.connect(
-                (w, s) => this.realize_surface(s));
-#endif
+        m_switcher = switcher_new(false);
+        m_switcher_active = m_switcher;
         // The initial shortcut is "<Super>space"
         bind_switch_shortcut();
-
-        if (m_switcher_delay_time >= 0) {
-            m_switcher.set_popup_delay_time((uint) m_switcher_delay_time);
-        }
 
         m_property_panel = new PropertyPanel();
         m_property_panel.property_activate.connect((w, k, s) => {
             property_activate(k, s);
         });
-
-        set_version();
-        check_wayland();
 
         state_changed();
     }
@@ -182,6 +171,73 @@ class Panel : IBus.PanelService {
                 BindingCommon.KeyEventFuncType.ANY, m_keybindings);
         m_keybindings = null;
     }
+
+    private CandidatePanel candidate_panel_new(bool no_wayland_panel) {
+        CandidatePanel candidate_panel = new CandidatePanel(m_is_wayland,
+                                                            no_wayland_panel);
+        candidate_panel.page_up.connect((w) => this.page_up());
+        candidate_panel.page_down.connect((w) => this.page_down());
+        candidate_panel.cursor_up.connect((w) => this.cursor_up());
+        candidate_panel.cursor_down.connect((w) => this.cursor_down());
+        candidate_panel.candidate_clicked.connect(
+                (w, i, b, s) => this.candidate_clicked(i, b, s));
+#if USE_GDK_WAYLAND
+        candidate_panel.forward_process_key_event.connect(
+                (w, v, c, m) => this.forward_process_key_event(v, c - 8, m));
+        candidate_panel.realize_surface.connect(
+                (w, s) => this.realize_surface(s));
+#endif
+        return candidate_panel;
+    }
+
+    private Switcher switcher_new(bool no_wayland_panel) {
+        Switcher switcher = new Switcher(m_is_wayland, no_wayland_panel);
+#if USE_GDK_WAYLAND
+        switcher.realize_surface.connect(
+                (w, s) => this.realize_surface(s));
+        switcher.hide.connect(
+                (w) => {
+                    if (!no_wayland_panel)
+                        return;
+                    IBus.EngineDesc? selected_engine =
+                        switcher.get_selected_engine();
+                    set_engine(selected_engine);
+                    switcher.reset();
+                    m_switcher_selected_index = -1;
+                });
+#endif
+        if (m_switcher_delay_time >= 0) {
+            switcher.set_popup_delay_time((uint) m_switcher_delay_time);
+        }
+        return switcher;
+    }
+
+#if USE_GDK_WAYLAND
+    private CandidatePanel get_active_candidate_panel() {
+        if (m_wayland_object_path == null) {
+            if (m_candidate_panel_x11 == null) {
+                m_candidate_panel_x11 = candidate_panel_new(true);
+                set_use_glyph_from_engine_lang();
+                m_candidate_panel_x11.set_vertical(
+                        m_settings_panel.get_int("lookup-table-orientation")
+                        == IBus.Orientation.VERTICAL);
+            }
+            return m_candidate_panel_x11;
+        } else {
+            return m_candidate_panel;
+        }
+    }
+
+    private Switcher get_active_switcher() {
+        if (m_wayland_object_path == null) {
+            if (m_switcher_x11 == null)
+                m_switcher_x11 = switcher_new(true);
+            return m_switcher_x11;
+        } else {
+            return m_switcher;
+        }
+    }
+#endif
 
     private void init_settings() {
         m_settings_general = new GLib.Settings("org.freedesktop.ibus.general");
@@ -253,11 +309,7 @@ class Panel : IBus.PanelService {
 
         m_settings_panel.changed["use-glyph-from-engine-lang"].connect((key) =>
         {
-                m_use_engine_lang = m_settings_panel.get_boolean(
-                        "use-glyph-from-engine-lang");
-                var engine = m_bus.get_global_engine();
-                if (engine != null)
-                    set_language_from_engine(engine);
+                set_use_glyph_from_engine_lang();
         });
 
         m_settings_panel.changed["show-icon-on-systray"].connect((key) => {
@@ -322,7 +374,10 @@ class Panel : IBus.PanelService {
 
 
 #if INDICATOR
-    private static bool is_kde() {
+    private bool is_indicator() {
+        if (m_is_wayland && m_is_wayland_im)
+            return true;
+
         unowned string? desktop =
             Environment.get_variable("XDG_CURRENT_DESKTOP");
         if (desktop == "KDE")
@@ -400,6 +455,7 @@ class Panel : IBus.PanelService {
         Gdk.Window? window = null;
         Gtk.MenuPositionFunc? func = null;
         m_status_icon.set_from_icon_name("ibus-keyboard");
+#if ENABLE_XIM
         var display = BindingCommon.get_xdisplay();
         if (display == null) {
             warning("No Gdk.X11.Display");
@@ -408,7 +464,7 @@ class Panel : IBus.PanelService {
         window = Gdk.X11.Window.lookup_for_display(
                 display,
                 m_status_icon.get_x11_window_id()) as Gdk.Window;
-        if (window == null && !BindingCommon.default_is_xdisplay()) {
+        if (window == null && m_is_wayland) {
             unowned X.Display xdisplay = display.get_xdisplay();
             X.Window root = xdisplay.default_root_window();
             window = Gdk.X11.Window.lookup_for_display(
@@ -443,6 +499,10 @@ class Panel : IBus.PanelService {
                         create_activate_menu(true),
                         area, window, func);
         });
+#else
+        warning("No Gdk.X11.Display");
+        return;
+#endif
     }
 
     private void bind_switch_shortcut() {
@@ -463,7 +523,7 @@ class Panel : IBus.PanelService {
                     handle_engine_switch_reverse);
         }
 #if USE_GDK_WAYLAND
-        if (BindingCommon.default_is_xdisplay())
+        if (!m_is_wayland)
             return;
         IBus.ProcessKeyEventData[] keys = {};
         IBus.ProcessKeyEventData key;
@@ -651,8 +711,15 @@ class Panel : IBus.PanelService {
         m_switcher_delay_time =
                 m_settings_general.get_int("switcher-delay-time");
 
-        if (m_switcher != null && m_switcher_delay_time >= 0) {
-            m_switcher.set_popup_delay_time((uint) m_switcher_delay_time);
+        if (m_switcher_delay_time >= 0) {
+            if (m_switcher != null)
+                m_switcher.set_popup_delay_time((uint)m_switcher_delay_time);
+#if USE_GDK_WAYLAND
+            if (m_switcher_x11 != null) {
+                m_switcher_x11.set_popup_delay_time(
+                        (uint)m_switcher_delay_time);
+            }
+#endif
         }
     }
 
@@ -680,6 +747,14 @@ class Panel : IBus.PanelService {
     private void set_use_xmodmap() {
         m_xkblayout.set_use_xmodmap(
                 m_settings_general.get_boolean("use-xmodmap"));
+    }
+
+    private void set_use_glyph_from_engine_lang() {
+        m_use_engine_lang = m_settings_panel.get_boolean(
+                "use-glyph-from-engine-lang");
+        var engine = m_bus.get_global_engine();
+        if (engine != null)
+            set_language_from_engine(engine);
     }
 
     private void set_show_icon_on_systray(bool update_now) {
@@ -710,12 +785,12 @@ class Panel : IBus.PanelService {
     }
 
     private void set_lookup_table_orientation() {
-        if (m_candidate_panel == null)
-            return;
 
-        m_candidate_panel.set_vertical(
-                m_settings_panel.get_int("lookup-table-orientation")
-                == IBus.Orientation.VERTICAL);
+        if (m_candidate_panel_active != null) {
+            m_candidate_panel_active.set_vertical(
+                    m_settings_panel.get_int("lookup-table-orientation")
+                    == IBus.Orientation.VERTICAL);
+        }
     }
 
     private void set_show_property_panel() {
@@ -758,7 +833,7 @@ class Panel : IBus.PanelService {
             if (m_xkb_icon_pixbufs.size() > 0) {
                 m_xkb_icon_pixbufs.remove_all();
 
-                if (m_status_icon != null && m_switcher != null)
+                if (m_status_icon != null && m_switcher_active != null)
                     state_changed();
             }
         }
@@ -767,7 +842,7 @@ class Panel : IBus.PanelService {
             if (m_xkb_icon_image.size() > 0) {
                 m_xkb_icon_image.remove_all();
 
-                if (m_indicator != null && m_switcher != null)
+                if (m_indicator != null && m_switcher_active != null)
                     state_changed();
             }
         }
@@ -962,7 +1037,7 @@ class Panel : IBus.PanelService {
     public void disconnect_signals() {
         unowned GLib.Object object = m_status_icon;
 #if INDICATOR
-        if (m_is_kde)
+        if (m_is_indicator)
             object = m_indicator;
 #endif
         if (m_popup_menu_id > 0) {
@@ -999,11 +1074,13 @@ class Panel : IBus.PanelService {
      */
     public void
     set_global_shortcut_key_state(IBus.BusGlobalBindingType type,
-                                  bool                      is_pressed,
+                                  uint                      keyval,
+                                  uint                      keycode,
+                                  uint                      state,
                                   bool                      is_backward) {
         switch(type) {
         case IBus.BusGlobalBindingType.IME_SWITCHER:
-            handle_engine_switch_focused(is_pressed, is_backward);
+            handle_engine_switch_focused(keyval, keycode, state, is_backward);
             break;
         default: break;
         }
@@ -1029,14 +1106,18 @@ class Panel : IBus.PanelService {
     }
 
     private void set_language_from_engine(IBus.EngineDesc engine) {
-        if (m_use_engine_lang) {
-            m_candidate_panel.set_language(new Pango.AttrLanguage(
-                    Pango.Language.from_string(engine.get_language())));
-        } else {
-            m_candidate_panel.set_language(new Pango.AttrLanguage(
-                    Pango.Language.from_string(null)));
+        m_candidate_panel.set_language(new Pango.AttrLanguage(
+                Pango.Language.from_string(m_use_engine_lang
+                                           ? engine.get_language()
+                                           : null)));
+#if USE_GDK_WAYLAND
+        if (m_candidate_panel_x11 != null) {
+            m_candidate_panel_x11.set_language(new Pango.AttrLanguage(
+                    Pango.Language.from_string(m_use_engine_lang
+                                               ? engine.get_language()
+                                               : null)));
         }
-
+#endif
     }
 
     private void set_engine(IBus.EngineDesc engine) {
@@ -1090,7 +1171,7 @@ class Panel : IBus.PanelService {
             return;
 
         uint keyval = event.key.keyval;
-        uint modifiers = KeybindingManager.MODIFIER_FILTER & event.key.state;
+        uint modifiers = IBus.MODIFIER_FILTER & event.key.state;
 
         uint primary_modifiers =
             KeybindingManager.get_primary_modifier(event.key.state);
@@ -1114,8 +1195,8 @@ class Panel : IBus.PanelService {
              * in state_changed() and m_switcher.run() returns the index
              * for m_engines[] but m_engines[] was modified by state_changed()
              * and the index is not correct. */
-            i = m_switcher.run(keyval, modifiers, event, m_engines, i,
-                               m_real_current_context_path);
+            i = m_switcher_active.run(keyval, modifiers, event, m_engines, i,
+                                      m_real_current_context_path);
 
             if (i < 0) {
                 debug("switch cancelled");
@@ -1131,10 +1212,14 @@ class Panel : IBus.PanelService {
     }
 
 
-    private void handle_engine_switch_focused(bool pressed,
+    private void handle_engine_switch_focused(uint keyval,
+                                              uint keycode,
+                                              uint state,
                                               bool reverse) {
         if (m_engines.length < 2)
             return;
+        bool pressed = (state & IBus.ModifierType.RELEASE_MASK) != 0
+                       ? false : true;
         if (pressed) {
             int i = reverse ? m_engines.length - 1 : 1;
             if (m_switcher_selected_index >= 0) {
@@ -1143,31 +1228,23 @@ class Panel : IBus.PanelService {
                 i = i < 0 ? m_engines.length - 1
                     : i == m_engines.length ? 0 : i;
             }
-            if (m_switcher_delay_time >= 0)
-                m_switcher_selected_index = m_switcher.run_popup(m_engines, i);
-            else
+            if (m_switcher_delay_time >= 0) {
+#if USE_GDK_WAYLAND
+                m_switcher_active = get_active_switcher();
+#endif
+                m_switcher_selected_index =
+                        m_switcher_active.run_popup(keyval,
+                                                    state,
+                                                    m_engines,
+                                                    i);
+            } else {
                 m_switcher_selected_index = i;
+            }
             if (m_verbose) {
                 save_log("Panel.%s switcher release %d timer\n".printf(
                          GLibMacro.G_STRFUNC, m_switcher_selected_index));
             }
-            m_switcher_waiting_release = null;
-            // TODO: "GlobalShortcutKeyResponded" signal can causes a freeze
-            // due to the GMainLoop dead lock for the key release events and
-            // add 5 seconds timeout here to release the key virtually for the
-            // workaround.
-            //
-            // Timeout.add_seconds() or Idle.add() slso causes the freeze
-            // due to the GMainLoop dead lock and use Thread instead.
-            m_switcher_waiting_release = new Thread<bool>("wait release",
-                                                          () => {
-                Thread.usleep(5000000);
-                handle_engine_switch_release(true);
-                m_switcher_waiting_release = null;
-                return true;
-            });
         } else {
-            m_switcher_waiting_release = null;
             handle_engine_switch_release(false);
         }
     }
@@ -1178,9 +1255,14 @@ class Panel : IBus.PanelService {
                      GLibMacro.G_STRFUNC, m_switcher_selected_index,
                      is_timeout ? "timeout" : "normal"));
         }
+#if USE_GDK_WAYLAND
+        // Should call realize_surface() before wl_surface_destroy() in
+        // Wayland input-method protocol V2.
+        this.realize_surface(null);
+#endif
         // TODO: Unfortunatelly hide() also depends on GMainLoop and can
         // causes a freeze.
-        m_switcher.hide();
+        m_switcher_active.hide();
         while (Gtk.events_pending())
             Gtk.main_iteration ();
         // If GLib.Thread() callback is called.
@@ -1409,15 +1491,20 @@ class Panel : IBus.PanelService {
 
             string copyright =
                 "Copyright © 2007-2015 Peng Huang\n" +
-                "Copyright © 2015-2022 Takao Fujiwara\n" +
-                "Copyright © 2007-2015 Red Hat, Inc.\n";
+                "Copyright © 2015-2025 Takao Fujiwara\n" +
+                "Copyright © 2007-2025 Red Hat, Inc.\n";
 
             m_about_dialog.set_copyright(copyright);
-            m_about_dialog.set_license("LGPL");
+            m_about_dialog.set_license_type(Gtk.License.LGPL_2_1);
             m_about_dialog.set_comments(_("IBus is an intelligent input bus for Linux/Unix."));
             m_about_dialog.set_website("https://github.com/ibus/ibus/wiki");
-            m_about_dialog.set_authors({"Peng Huang <shawn.p.huang@gmail.com>"});
-            m_about_dialog.set_documenters({"Peng Huang <shawn.p.huang@gmail.com>"});
+            m_about_dialog.set_authors(
+                    {"Peng Huang <shawn.p.huang@gmail.com>"});
+            m_about_dialog.add_credit_section(
+                    _("Maintainers"),
+                    {"Takao Fujiwara <takao.fujiwara1@gmail.com>"});
+            m_about_dialog.set_documenters(
+                    {"Takao Fujiwara <takao.fujiwara1@gmail.com>"});
             m_about_dialog.set_translator_credits(_("translator-credits"));
             m_about_dialog.set_logo_icon_name("ibus");
             m_about_dialog.set_icon_name("ibus");
@@ -1437,25 +1524,21 @@ class Panel : IBus.PanelService {
             string[] _args = {};
             _args += binary;
             _args += args;
-            if (args == "exit" || args == "restart")
-                _args += "--type=kde-wayland";
-            string? standard_out = null;
-            string? standard_error = null;
+            // FIXME: stdout & stderr causes a dead lock with `ibus restart`
+            // in Wayland input-method V2.
             GLib.Process.spawn_sync(null,
                                     _args,
                                     GLib.Environ.get(),
-                                    0,
+                                    GLib.SpawnFlags.SEARCH_PATH_FROM_ENVP,
                                     null,
-                                    out standard_out,
-                                    out standard_error,
+                                    null,
+                                    null,
                                     null);
-            if (standard_out != null)
-                print(standard_out);
-            if (standard_error != null)
-                warning("Execute %s failed! %s", binary, standard_error);
         } catch (GLib.SpawnError e) {
             warning("Execute %s failed! %s", binary, e.message);
         }
+        IBus.quit();
+        Gtk.main_quit();
     }
 
     private void append_preferences_menu(Gtk.Menu menu) {
@@ -1489,8 +1572,9 @@ class Panel : IBus.PanelService {
         if (m_sys_menu != null)
             return m_sys_menu;
 
+#if ENABLE_XIM
         Gdk.Display display_backup = null;
-        if (use_x11 && !BindingCommon.default_is_xdisplay()) {
+        if (use_x11 && m_is_wayland) {
             var display = BindingCommon.get_xdisplay();
             display_backup = Gdk.Display.get_default();
             if (display != null) {
@@ -1498,6 +1582,7 @@ class Panel : IBus.PanelService {
                         (Gdk.Display)display);
             }
         }
+#endif
 
         // Show system menu
         Gtk.MenuItem item;
@@ -1514,7 +1599,7 @@ class Panel : IBus.PanelService {
 
         item = new Gtk.MenuItem.with_label(_("Restart"));
         item.activate.connect((i) => {
-            if (m_is_kde && !BindingCommon.default_is_xdisplay())
+            if (m_is_indicator && m_is_wayland)
                 run_ibus_command("restart");
             else
                 m_bus.exit(true);
@@ -1523,7 +1608,7 @@ class Panel : IBus.PanelService {
 
         item = new Gtk.MenuItem.with_label(_("Quit"));
         item.activate.connect((i) => {
-            if (m_is_kde && !BindingCommon.default_is_xdisplay())
+            if (m_is_indicator && m_is_wayland)
                 run_ibus_command("exit");
             else
                 m_bus.exit(false);
@@ -1532,13 +1617,16 @@ class Panel : IBus.PanelService {
 
         m_sys_menu.show_all();
 
+#if ENABLE_XIM
         if (display_backup != null)
             Gdk.DisplayManager.get().set_default_display(display_backup);
+#endif
 
         return m_sys_menu;
     }
 
     private Gtk.Menu create_activate_menu(bool use_x11 = false) {
+#if ENABLE_XIM
         Gdk.Display display_backup = null;
         if (use_x11 && !BindingCommon.default_is_xdisplay()) {
             var display = BindingCommon.get_xdisplay();
@@ -1548,6 +1636,7 @@ class Panel : IBus.PanelService {
                         (Gdk.Display)display);
             }
         }
+#endif
         m_ime_menu = new Gtk.Menu();
 
         // Show properties and IME switching menu
@@ -1591,8 +1680,10 @@ class Panel : IBus.PanelService {
         // Do not take focuse to avoid some focus related issues.
         m_ime_menu.set_take_focus(false);
 
+#if ENABLE_XIM
         if (display_backup != null)
             Gdk.DisplayManager.get().set_default_display(display_backup);
+#endif
         return m_ime_menu;
     }
 
@@ -1650,18 +1741,19 @@ class Panel : IBus.PanelService {
     /* override virtual functions */
     public override void set_cursor_location(int x, int y,
                                              int width, int height) {
-        m_candidate_panel.set_cursor_location(x, y, width, height);
+        m_candidate_panel_active.set_cursor_location(x, y, width, height);
         m_property_panel.set_cursor_location(x, y, width, height);
     }
 
     private bool switcher_focus_set_engine_real() {
-        IBus.EngineDesc? selected_engine = m_switcher.get_selected_engine();
-        string prev_context_path = m_switcher.get_input_context_path();
+        IBus.EngineDesc? selected_engine =
+                m_switcher_active.get_selected_engine();
+        string prev_context_path = m_switcher_active.get_input_context_path();
         if (selected_engine != null &&
             prev_context_path != "" &&
             prev_context_path == m_current_context_path) {
             set_engine(selected_engine);
-            m_switcher.reset();
+            m_switcher_active.reset();
             return true;
         }
 
@@ -1669,11 +1761,12 @@ class Panel : IBus.PanelService {
     }
 
     private void switcher_focus_set_engine() {
-        IBus.EngineDesc? selected_engine = m_switcher.get_selected_engine();
-        string prev_context_path = m_switcher.get_input_context_path();
+        IBus.EngineDesc? selected_engine =
+                m_switcher_active.get_selected_engine();
+        string prev_context_path = m_switcher_active.get_input_context_path();
         if (selected_engine == null &&
             prev_context_path != "" &&
-            m_switcher.is_running()) {
+            m_switcher_active.is_running()) {
             var context = GLib.MainContext.default();
             if (m_switcher_focus_set_engine_id > 0 &&
                 context.find_source_by_id(m_switcher_focus_set_engine_id)
@@ -1785,7 +1878,8 @@ class Panel : IBus.PanelService {
                         m_menu_update_delay_time,
                         () => {
                             m_indicator.set_menu(create_activate_menu ());
-                            return false;
+                            m_menu_update_delay_time_id = 0;
+                            return Source.REMOVE;
                         });
 #endif
     }
@@ -1800,51 +1894,70 @@ class Panel : IBus.PanelService {
                                              uint cursor_pos,
                                              bool visible) {
         if (visible) {
-            m_candidate_panel.set_preedit_text(text, cursor_pos);
+#if USE_GDK_WAYLAND
+            m_candidate_panel_active = get_active_candidate_panel();
+#endif
+            m_candidate_panel_active.set_preedit_text(text, cursor_pos);
             m_property_panel.set_preedit_text(text, cursor_pos);
         } else {
-            m_candidate_panel.set_preedit_text(null, 0);
+            m_candidate_panel_active.set_preedit_text(null, 0);
             m_property_panel.set_preedit_text(null, 0);
         }
     }
 
     public override void hide_preedit_text() {
-        m_candidate_panel.set_preedit_text(null, 0);
+        m_candidate_panel_active.set_preedit_text(null, 0);
     }
 
     public override void update_auxiliary_text(IBus.Text text,
                                                bool visible) {
-        m_candidate_panel.set_auxiliary_text(visible ? text : null);
+#if USE_GDK_WAYLAND
+        if (visible)
+            m_candidate_panel_active = get_active_candidate_panel();
+#endif
+        m_candidate_panel_active.set_auxiliary_text(visible ? text : null);
         m_property_panel.set_auxiliary_text(visible ? text : null);
     }
 
     public override void hide_auxiliary_text() {
-        m_candidate_panel.set_auxiliary_text(null);
+        m_candidate_panel_active.set_auxiliary_text(null);
     }
 
     public override void update_lookup_table(IBus.LookupTable table,
                                              bool visible) {
-        m_candidate_panel.set_lookup_table(visible ? table : null);
+#if USE_GDK_WAYLAND
+        if (visible)
+            m_candidate_panel_active = get_active_candidate_panel();
+#endif
+        m_candidate_panel_active.set_lookup_table(visible ? table : null);
         m_property_panel.set_lookup_table(visible ? table : null);
     }
 
     public override void hide_lookup_table() {
-        m_candidate_panel.set_lookup_table(null);
+        m_candidate_panel_active.set_lookup_table(null);
     }
 
     public override void set_content_type(uint purpose, uint hints) {
-        m_candidate_panel.set_content_type(purpose, hints);
+        m_candidate_panel_active.set_content_type(purpose, hints);
     }
 
     public override void state_changed() {
         /* Do not change the order of m_engines during running switcher. */
-        if (m_switcher.is_running())
+        if (m_switcher_active.is_running())
             return;
 
 #if INDICATOR
         if (m_icon_type == IconType.INDICATOR) {
             // Wait for the callback of the session bus.
             if (m_indicator == null)
+                return;
+        }
+#endif
+
+#if USE_GDK_WAYLAND
+        // GtkStatusIcon.priv.image is NULL in Wayland
+        if (m_icon_type == STATUS_ICON &&
+            !BindingCommon.default_is_xdisplay()) {
                 return;
         }
 #endif
@@ -1872,7 +1985,7 @@ class Panel : IBus.PanelService {
             if (engine != null) {
                 var name = engine.get_name();
                 if (name.length >= 4 && name[0:4] == "xkb:")
-                    language = m_switcher.get_xkb_language(engine);
+                    language = m_switcher_active.get_xkb_language(engine);
             }
 
             if (language != null) {
@@ -1937,4 +2050,10 @@ class Panel : IBus.PanelService {
         }
         m_settings_general.set_strv("engines-order", names);
     }
+
+#if USE_GDK_WAYLAND
+    public void set_wayland_object_path(string? object_path) {
+        m_wayland_object_path = object_path;
+    }
+#endif
 }

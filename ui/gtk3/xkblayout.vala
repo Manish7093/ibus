@@ -4,7 +4,7 @@
  *
  * Copyright(c) 2014 Red Hat, Inc.
  * Copyright(c) 2014 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright(c) 2014-2024 Takao Fujiwara <tfujiwar@redhat.com>
+ * Copyright(c) 2014-2025 Takao Fujiwara <tfujiwar@redhat.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -48,6 +48,11 @@ class XKBLayout
     public void get_layout(out string layout,
                            out string variant,
                            out string option) {
+        layout = "";
+        variant = "";
+        var o = Environment.get_variable("XKB_DEFAULT_OPTIONS");
+        option = o != null ? o : "";
+
         search_get_layout_program();
         if (m_get_layout_args[0] == null) {
             warning("Not found localectl or setxkbmap command in PATH");
@@ -59,10 +64,6 @@ class XKBLayout
         string standard_output = null;
         string standard_error = null;
         int exit_status = 0;
-
-        layout = "";
-        variant = "";
-        option = "";
 
         try {
             GLib.Process.spawn_sync(null,
@@ -83,14 +84,14 @@ class XKBLayout
 
         if (exec_command[0] == "localectl") {
             parse_localectl_status_str(standard_output,
-                                       out layout,
-                                       out variant,
-                                       out option);
+                                       ref layout,
+                                       ref variant,
+                                       ref option);
         } else if (exec_command[0] == XKB_COMMAND) {
             parse_xkbmap_query_str(standard_output,
-                                   out layout,
-                                   out variant,
-                                   out option);
+                                   ref layout,
+                                   ref variant,
+                                   ref option);
         }
     }
 
@@ -112,12 +113,9 @@ class XKBLayout
 
 
     private void parse_localectl_status_str(string standard_output,
-                                            out string layout,
-                                            out string variant,
-                                            out string option) {
-        layout = "";
-        variant = "";
-        option = "";
+                                            ref string layout,
+                                            ref string variant,
+                                            ref string option) {
         foreach (string line in standard_output.split("\n")) {
             const string[] elements = { "X11 Layout:", "X11 Variant:" };
             foreach (unowned string element in elements) {
@@ -138,12 +136,9 @@ class XKBLayout
 
 
     private void parse_xkbmap_query_str(string standard_output,
-                                        out string layout,
-                                        out string variant,
-                                        out string option) {
-        layout = "";
-        variant = "";
-        option = "";
+                                        ref string layout,
+                                        ref string variant,
+                                        ref string option) {
         foreach (string line in standard_output.split("\n")) {
             const string[] elements = { "layout:", "variant:", "options:" };
             foreach (unowned string element in elements) {

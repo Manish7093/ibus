@@ -3,8 +3,8 @@
 # ibus - The Input Bus
 #
 # Copyright (c) 2007-2016 Peng Huang <shawn.p.huang@gmail.com>
-# Copyright (c) 2015-2024 Takao Fujiwara <takao.fujiwara1@gmail.com>
-# Copyright (c) 2007-2024 Red Hat, Inc.
+# Copyright (c) 2015-2025 Takao Fujiwara <takao.fujiwara1@gmail.com>
+# Copyright (c) 2007-2025 Red Hat, Inc.
 #
 # This library is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
@@ -27,8 +27,8 @@ m4_define([ibus_released], [0])
 
 m4_define([ibus_major_version], [1])
 m4_define([ibus_minor_version], [5])
-m4_define([ibus_micro_version], [31])
-m4_define([ibus_beta_version], [rc1])
+m4_define([ibus_micro_version], [32])
+m4_define([ibus_beta_version], [rc2])
 m4_define([ibus_abi_current], [5])
 m4_define([ibus_abi_revision],
           [m4_eval(100 * ibus_minor_version + ibus_micro_version)])
@@ -249,10 +249,6 @@ AC_ARG_ENABLE(xim,
 )
 AM_CONDITIONAL([ENABLE_XIM], [test x"$enable_xim" = x"yes"])
 
-if test x"$enable_xim" = x"yes"; then
-    AC_SUBST([XIM_CLI_ARG], [--xim])
-fi
-
 # --enable-wayland option.
 AC_ARG_ENABLE(wayland,
     AS_HELP_STRING([--enable-wayland],
@@ -336,6 +332,8 @@ if test x"$enable_xim" = x"yes"; then
             gtk+-2.0
         ])
     fi
+    AC_SUBST([XIM_CLI_ARG], [--xim])
+    AC_DEFINE(HAVE_XIM, 1, [Define to enable XIM])
     enable_xim="yes (enabled, use --disable-xim to disable)"
 fi
 if test x"$enable_gtk3" = x"yes"; then
@@ -372,10 +370,18 @@ if test x"$enable_wayland" = x"yes"; then
         wayland-client >= 1.2.0
         xkbcommon
     ])
+    PKG_CHECK_EXISTS([wayland-protocols],
+        [WAYLAND_PRTCLS_DIR="`$PKG_CONFIG --variable=pkgdatadir wayland-protocols`"],
+        [WAYLAND_PRTCLS_DIR="/usr/share/wayland-protocols"]
+    )
+    WAYLAND_PRTCLS_DIR="`echo $WAYLAND_PRTCLS_DIR`"
     m4_ifdef([WAYLAND_SCANNER_RULES],
-             [WAYLAND_PRTCLS_SUBDIR='wayland-protocols/unstable/input-method'
-              AC_SUBST(WAYLAND_PRTCLS_SUBDIR)
-              WAYLAND_SCANNER_RULES(['$(datadir)/$(WAYLAND_PRTCLS_SUBDIR)'])],
+             [WAYLAND_IM_PRTCL_SUBDIR='unstable/input-method'
+              WAYLAND_TEXT_PRTCL_SUBDIR='unstable/text-input'
+              AC_SUBST(WAYLAND_PRTCLS_DIR)
+              AC_SUBST(WAYLAND_IM_PRTCL_SUBDIR)
+              AC_SUBST(WAYLAND_TEXT_PRTCL_SUBDIR)
+              WAYLAND_SCANNER_RULES(['$(WAYLAND_PRTCLS_DIR)/$(WAYLAND_IM_PRTCL_SUBDIR)'])],
              [AC_SUBST(wayland_scanner_rules)])
     enable_wayland="yes (enabled, use --disable-wayland to disable)"
 else
@@ -679,10 +685,6 @@ AC_ARG_ENABLE(ui,
 )
 AM_CONDITIONAL([ENABLE_UI], [test x"$enable_ui" = x"yes"])
 if test x"$enable_ui" = x"yes"; then
-    # Check for x11
-    PKG_CHECK_MODULES(X11, [
-        x11
-    ])
     enable_ui="yes (enabled, use --disable-ui to disable)"
 fi
 
